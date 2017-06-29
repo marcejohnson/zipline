@@ -25,7 +25,7 @@ def csvdir_equities(tframe='daily', start=None, end=None):
     start : datetime, optional
         The start date to query for. By default this pulls the full history
         for the calendar.
-    end : datetime, optional
+    end : datetime, optional        
         The end date to query for. By default this pulls the full history
         for the calendar.
     Returns
@@ -36,19 +36,18 @@ def csvdir_equities(tframe='daily', start=None, end=None):
     --------
     This code should be added to ~/.zipline/extension.py
     .. code-block:: python
-       from zipline.data.bundles import csvdir_equities, register
-       register('custom-csvdir-bundle', csvdir_equities(sys.environ['CSVDIR'], 'minute'))
+       from zipline.data.bundles import csvdir, register
+       register('csvdir', csvdir.csvdir_equities(sys.environ['CSVDIR'], 'minute'))
 
     Notes
     -----
-    Environment variable CSVDIR must contain path to the directory with <symbol>.cvs files
+    Environment variable CSVDIR must contain path to the directory with <symbol>.csv files
     sids for each symbol will be the index into the symbols sequence.
     """
-    
+
     def ingest(environ, asset_db_writer, minute_bar_writer, daily_bar_writer,
                adjustment_writer, calendar, start_session, end_session, cache,
                show_progress, output_dir, start=start, end=end):
-
 
         csvdir = os.environ.get('CSVDIR')
         if not csvdir:
@@ -64,19 +63,27 @@ def csvdir_equities(tframe='daily', start=None, end=None):
             logger.error("no <symbol>.csv files found in %s" % csvdir)
 
         metadata = pandas.DataFrame(numpy.empty(len(symbols),
-                                                dtype=[('start_date', 'datetime64[ns]'),
-                                                       ('end_date', 'datetime64[ns]'),
-                                                       ('auto_close_date', 'datetime64[ns]'),
-                                                       ('symbol', 'object')]))
+                    dtype=[('start_date', 'datetime64[ns]'),
+                           ('end_date', 'datetime64[ns]'),
+                           ('auto_close_date', 'datetime64[ns]'),
+                           ('symbol', 'object')]))
 
         def _pricing_iter():
             with maybe_show_progress(symbols, show_progress,
                                      label='Loading custom pricing data: ') as it:
-                for sid, symbol in enumerate(it):
+                for sid, symbol in enumerate(it):                    
                     logger.debug('%s: sid %s' % (symbol, sid))
 
-                    df = pandas.read_csv(os.path.join(csvdir, '%s.csv' % symbol),
-                                         parse_dates=[0], infer_datetime_format=True, index_col=0).sort_index()
+                    try:
+                        df = pandas.read_csv(os.path.join(csvdir, '%s.csv' % symbol),
+                            parse_dates=[0], infer_datetime_format=True, index_col=0).sort_index()
+                    except:
+                        logger.error("unable to parse %s.csv" % symbol)
+                        continue
+
+                    # skip empty
+                    if not len(df.index):
+                        continue
 
                     # the start date is the date of the first trade and
                     # the end date is the date of the last trade
@@ -87,10 +94,20 @@ def csvdir_equities(tframe='daily', start=None, end=None):
                     ac_date = end_date + pandas.Timedelta(days=1)
                     metadata.iloc[sid] = start_date, end_date, ac_date, symbol
 
+                    # Fix na and Fill missing dates
+                    sessions = calendar.sessions_in_range(start_date, end_date)
+                    df = df.reindex(
+                        sessions.tz_localize(None),
+                        copy=False,
+                    ).fillna(0.0)
+
                     yield sid, df
 
         writer = minute_bar_writer if tframe == 'minute' else daily_bar_writer
         writer.write(_pricing_iter(), show_progress=show_progress)
+
+        # drop metadata rows that are empty
+        metadata = metadata.dropna()
 
         # Hardcode the exchange to "CSVDIR" for all assets and (elsewhere)
         # register "CSVDIR" to resolve to the NYSE calendar, because these are
@@ -103,4 +120,3 @@ def csvdir_equities(tframe='daily', start=None, end=None):
     return ingest
 
 register_calendar_alias("CSVDIR", "NYSE")
-
